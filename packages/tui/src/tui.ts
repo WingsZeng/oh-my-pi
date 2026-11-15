@@ -505,13 +505,19 @@ export interface OverlayOptions {
 	// === Fullscreen ===
 	/**
 	 * Borrow the terminal's alternate screen buffer for this overlay's lifetime
-	 * (vim/less idiom). While the topmost visible overlay sets this, the engine
-	 * paints only the modal on the alt screen and emits no ED3 / scrollback
+	 * (vim/less idiom). While any visible fullscreen overlay owns the buffer, the
+	 * engine paints the visible overlay stack there and emits no ED3 / scrollback
 	 * bytes, so the transcript on the normal screen stays untouched and is not
-	 * scrollable behind the modal. Defaults off — all other overlays are
-	 * unchanged and still draw over the transcript on the normal screen.
+	 * scrollable behind it. Defaults off — without a fullscreen owner, overlays
+	 * draw over the transcript on the normal screen.
 	 */
 	fullscreen?: boolean;
+	/**
+	 * Keep this overlay below ordinary dialogs and menus without making it a
+	 * modal key holder. Persistent application surfaces use this to own the
+	 * alternate screen while their shared editor retains focus.
+	 */
+	base?: boolean;
 	/**
 	 * Enable terminal mouse reporting while fullscreen. Defaults on; disable it
 	 * when native terminal text selection takes precedence over pointer events.
@@ -1347,11 +1353,10 @@ export class TUI extends Container {
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
-		this.overlayStack.push(entry);
-		// Only focus if overlay is actually visible
-		if (this.#isOverlayVisible(entry)) {
-			this.setFocus(component);
-		}
+		if (options?.base) this.overlayStack.unshift(entry);
+		else this.overlayStack.push(entry);
+		// Base surfaces never receive focus; ordinary overlays retain modal behavior.
+		if (!options?.base && this.#isOverlayVisible(entry)) this.setFocus(component);
 		this.terminal.hideCursor();
 		this.#recordHardwareCursorHidden();
 		this.requestRender();
@@ -1362,14 +1367,16 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
-					// Overlays opened over this one return focus to where it would have.
-					for (const other of this.overlayStack) {
-						if (other.preFocus && isOverlayFocusTarget(component, other.preFocus))
-							other.preFocus = entry.preFocus;
-					}
-					// Restore focus if this overlay or one of its owned targets had focus
-					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+					if (!options?.base) {
+						// Overlays opened over this one return focus to where it would have.
+						for (const other of this.overlayStack) {
+							if (other.preFocus && isOverlayFocusTarget(component, other.preFocus)) {
+								other.preFocus = entry.preFocus;
+							}
+						}
+						if (isOverlayFocusTarget(component, this.#focusedComponent)) {
+							this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+						}
 					}
 					if (this.overlayStack.length === 0) {
 						this.terminal.hideCursor();
@@ -1381,15 +1388,13 @@ export class TUI extends Container {
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
-				// Update focus when hiding/showing
-				if (hidden) {
-					// If this overlay or one of its owned targets had focus, move focus to the next one holding keys or preFocus
-					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
-					}
-				} else {
-					// Restore focus to this overlay when showing (if it's actually visible)
-					if (this.#isOverlayVisible(entry)) {
+				// Base surfaces never participate in focus changes when hidden or shown.
+				if (!options?.base) {
+					if (hidden) {
+						if (isOverlayFocusTarget(component, this.#focusedComponent)) {
+							this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+						}
+					} else if (this.#isOverlayVisible(entry)) {
 						this.setFocus(component);
 					}
 				}
@@ -1399,11 +1404,17 @@ export class TUI extends Container {
 		};
 	}
 
-	/** Hide the topmost overlay and restore previous focus. */
+	/** Hide the topmost ordinary overlay and restore previous focus. */
 	hideOverlay(): void {
-		const overlay = this.overlayStack.pop();
-		if (!overlay) return;
-		// Find the topmost visible overlay holding keys, or fall back to preFocus
+		const overlay = this.overlayStack.at(-1);
+		if (!overlay || overlay.options?.base) return;
+		this.overlayStack.pop();
+		// A base inserted below this overlay may have captured it as preFocus.
+		for (const other of this.overlayStack) {
+			if (other.preFocus && isOverlayFocusTarget(overlay.component, other.preFocus)) {
+				other.preFocus = overlay.preFocus;
+			}
+		}
 		this.setFocus(this.#getKeyHolderOverlay()?.component ?? overlay.preFocus);
 		if (this.overlayStack.length === 0) {
 			this.terminal.hideCursor();
@@ -1412,9 +1423,9 @@ export class TUI extends Container {
 		this.requestRender();
 	}
 
-	/** Check if there are any visible overlays */
+	/** Check if there are any visible ordinary overlays. */
 	hasOverlay(): boolean {
-		return this.overlayStack.some(o => this.#isOverlayVisible(o));
+		return this.overlayStack.some(o => o.options?.base !== true && this.#isOverlayVisible(o));
 	}
 
 	/**
@@ -1505,11 +1516,20 @@ export class TUI extends Container {
 		return undefined;
 	}
 
+	/** Find the topmost visible overlay that owns the alternate screen. */
+	#getFullscreenOverlay(): (typeof this.overlayStack)[number] | undefined {
+		for (let i = this.overlayStack.length - 1; i >= 0; i--) {
+			const entry = this.overlayStack[i];
+			if (entry.options?.fullscreen === true && this.#isOverlayVisible(entry)) return entry;
+		}
+		return undefined;
+	}
+
 	/** The topmost visible overlay that holds the keys: not a sheet the user clicked away from. */
 	#getKeyHolderOverlay(): (typeof this.overlayStack)[number] | undefined {
 		for (let i = this.overlayStack.length - 1; i >= 0; i--) {
 			const entry = this.overlayStack[i];
-			if (!entry.released && this.#isOverlayVisible(entry)) return entry;
+			if (entry.options?.base !== true && !entry.released && this.#isOverlayVisible(entry)) return entry;
 		}
 		return undefined;
 	}
@@ -4085,18 +4105,18 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Fullscreen alt-screen short-circuit. While the topmost visible overlay
-		// requests it, borrow the terminal's alternate buffer and paint only the
-		// modal there; the normal screen and all accounting stay untouched.
+		// A persistent fullscreen base keeps owning the alternate screen while
+		// ordinary overlays composite and receive focus above it.
 		const topOverlay = this.#getTopmostVisibleOverlay();
-		const wantAlt = topOverlay?.options?.fullscreen === true;
+		const fullscreenOverlay = this.#getFullscreenOverlay();
+		const wantAlt = fullscreenOverlay !== undefined;
 		const wantMouse: MouseTrackingState =
-			topOverlay === undefined
-				? this.#inlineMouseProvider?.() === true
-					? "inline"
-					: "off"
-				: wantAlt && topOverlay.options?.mouseTracking !== false
+			fullscreenOverlay !== undefined
+				? fullscreenOverlay.options?.mouseTracking !== false
 					? "full"
+					: "off"
+				: topOverlay === undefined && this.#inlineMouseProvider?.() === true
+					? "inline"
 					: "off";
 		if (wantAlt && !this.#altActive) {
 			// Enhanced keyboard modes can be buffer-local: re-push the active
@@ -4696,10 +4716,10 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Compose and paint a single fullscreen overlay frame on the alt buffer.
-	 * Cursor markers are stripped from the frame, but only a focused cursor-mode
-	 * component owned by the fullscreen overlay may position the hardware cursor.
-	 * The normal transcript is never composited into the alternate buffer.
+	 * Compose and paint the visible overlay stack on the alt buffer. Cursor markers
+	 * are stripped from the frame, but only a focused cursor-mode component owned
+	 * by the actual top overlay may position the hardware cursor. The normal
+	 * transcript is never composited into the alternate buffer.
 	 */
 	#renderAltFrame(width: number, height: number): void {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added persistent base overlays that can keep an alternate-screen application surface active beneath ordinary dialogs without taking keyboard focus.
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

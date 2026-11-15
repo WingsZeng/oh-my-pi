@@ -347,6 +347,7 @@ import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, setImageBlobWriter } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
+import { FullscreenChatView } from "./components/fullscreen-chat-view";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -447,6 +448,7 @@ import {
 	cfgSymbolPreset,
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
+	cfgTuiFullscreen,
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
@@ -497,6 +499,7 @@ const cfgLiveUiSettings = combine({
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
 	"tui.completeScrollback": cfgTuiCompleteScrollback,
+	"tui.fullscreen": cfgTuiFullscreen,
 	"tui.imeSafeCursor": cfgTuiImeSafeCursor,
 	autocompleteMaxVisible: cfgAutocompleteMaxVisible,
 	"spelling.typoDetection": cfgSpellingTypoDetection,
@@ -1421,6 +1424,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	#fullscreenChatOverlay: OverlayHandle | undefined;
+	#fullscreenChatInputUnsubscribe: (() => void) | undefined;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -2701,6 +2706,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (process.platform === "darwin" && TERMINAL.id === "wezterm" && !isInsideTerminalMultiplexer()) {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
 		}
+
+		this.#setFullscreenTui(cfgTuiFullscreen.get(this.settings));
 
 		// A prepaint Composer may already own raw mode and the render loop.
 		if (!this.#ownsStartedUi) {
@@ -4293,6 +4300,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// setPreferences re-themes the editor, which resets its mode-tinted border.
 			this.updateEditorBorderColor();
 		}
+		if (any("tui.fullscreen")) this.#setFullscreenTui(next["tui.fullscreen"]);
 		if (any("composer.shape")) this.syncComposerShape();
 		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
@@ -8236,6 +8244,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
+		this.#setFullscreenTui(false);
 		if (this.#ownsStartedUi) {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
@@ -8541,6 +8550,63 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.shutdown({ cancellable: false });
+	}
+
+	#setFullscreenTui(enabled: boolean): void {
+		if (enabled) {
+			if (this.#fullscreenChatOverlay) return;
+			const view = new FullscreenChatView({
+				transcript: [this.chatContainer, this.pendingShellContainer],
+				dock: [
+					this.pendingMessagesContainer,
+					this.todoContainer,
+					this.subagentContainer,
+					this.btwContainer,
+					this.reportContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+					this.modelCycleContainer,
+					this.deferredCommandContainer,
+					this.progressHudContainer,
+					this.statusContainer,
+					this.attachmentChipsContainer,
+					this.editorTopGapContainer,
+					this.hookWidgetContainerAbove,
+					this.editorContainer,
+					this.hookWidgetContainerBelow,
+					this.statusLine,
+				],
+				editorContainer: this.editorContainer,
+				terminalRows: () => this.ui.terminal.rows,
+			});
+			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(
+				data => {
+					if (this.ui.getFocused() !== this.editor || !view.handleViewportInput(data)) return undefined;
+					this.ui.requestRender();
+					return { consume: true };
+				},
+				{ prepend: true },
+			);
+			this.#fullscreenChatOverlay = this.ui.showOverlay(view, {
+				width: "100%",
+				maxHeight: "100%",
+				anchor: "top-left",
+				margin: 0,
+				fullscreen: true,
+				mouseTracking: true,
+				base: true,
+			});
+			this.ui.requestRender(true);
+			return;
+		}
+
+		if (!this.#fullscreenChatOverlay && !this.#fullscreenChatInputUnsubscribe) return;
+		this.#fullscreenChatInputUnsubscribe?.();
+		this.#fullscreenChatInputUnsubscribe = undefined;
+		this.#fullscreenChatOverlay?.hide();
+		this.#fullscreenChatOverlay = undefined;
+		this.ui.requestRender(true);
 	}
 
 	// Extension UI integration

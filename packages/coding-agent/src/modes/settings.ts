@@ -363,6 +363,18 @@ export const cfgTuiMaxInlineImages = register({
 		"Maximum number of inline images kept as live terminal graphics (default 8). Older images fall back to a text placeholder via a full redraw once the limit is exceeded. Set to 0 to keep every image (no limit).",
 });
 
+export const cfgTuiFullscreen = register({
+	id: "tui.fullscreen",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Chat",
+		description: "Use an alternate-screen chat view with a scrollable transcript and fixed input dock",
+	},
+});
+
 export const cfgTuiResizeScrollback = register({
 	id: "tui.resizeScrollback",
 	type: "enum",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `tui.fullscreen` mode: the transcript scrolls in an alternate-screen viewport while the composer, queued messages, HUD widgets, and status line remain fixed and editable at the bottom.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

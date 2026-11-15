@@ -109,6 +109,49 @@ class CapturingRecorder extends FocusRecorder {
 }
 
 describe("TUI overlay focus", () => {
+	it("keeps fullscreen ownership through dialogs until the base handle closes", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const editor = new FocusRecorder("editor");
+		const base = new OwningOverlay("fullscreen-base");
+		const dialog = new FocusRecorder("dialog");
+
+		tui.addChild(editor);
+		tui.setFocus(editor);
+		base.focusTarget = editor;
+
+		try {
+			tui.start();
+			const dialogHandle = tui.showOverlay(dialog);
+			const baseHandle = tui.showOverlay(base, { base: true, fullscreen: true });
+			expect(tui.getFocused()).toBe(dialog);
+			tui.renderNow();
+			expect(terminal.output).toContain("\x1b[?1049h");
+			expect(tui.getDebugPaint()).toMatchObject({ altScreen: true });
+
+			terminal.output = "";
+			dialogHandle.hide();
+			expect(tui.getFocused()).toBe(editor);
+			tui.renderNow();
+			expect(terminal.output).not.toContain("\x1b[?1049l");
+			expect(terminal.output).not.toContain("\x1b[?1006l");
+			expect(tui.getDebugPaint()).toMatchObject({ altScreen: true });
+
+			const nextDialogHandle = tui.showOverlay(dialog);
+			terminal.output = "";
+			baseHandle.hide();
+			expect(tui.getFocused()).toBe(dialog);
+			tui.renderNow();
+			expect(terminal.output).toContain("\x1b[?1049l");
+			expect(tui.getDebugPaint()).toMatchObject({ altScreen: false });
+
+			nextDialogHandle.hide();
+			expect(tui.getFocused()).toBe(editor);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("delivers keys to the displaced editor beneath a paint-only overlay", () => {
 		const terminal = new MinimalTerminal();
 		const tui = new TUI(terminal);
@@ -363,5 +406,38 @@ describe("TUI overlay focus", () => {
 		} finally {
 			tui.stop();
 		}
+	});
+
+	it("keeps a fullscreen base below dialogs without taking editor focus", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const editor = new FocusRecorder("editor");
+		const base = new OwningOverlay("base");
+		base.focusTarget = editor;
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		const baseHandle = tui.showOverlay(base, { fullscreen: true, base: true });
+		expect(tui.getFocused()).toBe(editor);
+		expect(tui.hasOverlay()).toBe(false);
+		expect(tui.overlayStack.map(entry => entry.component)).toEqual([base]);
+
+		// Generic Escape-style overlay dismissal must not remove the persistent base.
+		tui.hideOverlay();
+		expect(tui.overlayStack.map(entry => entry.component)).toEqual([base]);
+
+		const dialog = new FocusRecorder("dialog");
+		const dialogHandle = tui.showOverlay(dialog);
+		expect(tui.getFocused()).toBe(dialog);
+		expect(tui.hasOverlay()).toBe(true);
+		expect(tui.overlayStack.map(entry => entry.component)).toEqual([base, dialog]);
+
+		dialogHandle.hide();
+		expect(tui.getFocused()).toBe(editor);
+		expect(tui.hasOverlay()).toBe(false);
+		expect(tui.overlayStack.map(entry => entry.component)).toEqual([base]);
+
+		baseHandle.hide();
+		expect(tui.overlayStack).toHaveLength(0);
 	});
 });
